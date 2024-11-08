@@ -2,7 +2,7 @@ import os
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
-from torch.distributed.pipelining import ScheduleGPipe
+from torch.distributed.pipelining import ScheduleGPipe, Schedule1F1B
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining import pipeline, SplitPoint
 
@@ -89,9 +89,6 @@ def run_test(gpu_id, world_size):
         schedule.step(x)
     else:
         output = schedule.step()
-
-    print("finished part 2")
-
 
 
 if __name__ == "__main__":
