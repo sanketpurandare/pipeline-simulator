@@ -4,8 +4,10 @@ import torch.distributed as dist
 import torch
 from torch.distributed.pipelining import ScheduleGPipe, Schedule1F1B, PipelineStage
 import torch.nn.functional as F
-
-
+from torch._subclasses.fake_tensor import FakeTensorMode
+from fake_collectives import CollDistMode
+import traceback
+import contextlib
 
 in_dim = 512
 layer_dims = [512, 1024, 256]
@@ -96,10 +98,6 @@ def run_worker(rank: int, world_size: int):
     dist.destroy_process_group()
 
 def run_test(gpu_id, world_size):
-    # print(dist.get_rank())
-    # print("Initialized Rank: ", gpu_id)
-    # print("Device Count: ", torch.cuda.device_count())
-    # print("Device id", torch.cuda.current_device())
 
     rank = gpu_id
 
@@ -111,28 +109,28 @@ def run_test(gpu_id, world_size):
     # Create the model chunks
     batch_size = 32
     n_microbatches = 4
-    if rank == 0:    
-        example_input = torch.randn(int(batch_size / n_microbatches), in_dim, device=device)
-        model = ModelChunk0()
-    elif rank == 1:
-        example_input = torch.randn(int(batch_size / n_microbatches), layer_dims[0], device=device)
-        model = ModelChunk1()
-    elif rank == 2:
-        example_input = torch.randn(int(batch_size / n_microbatches), layer_dims[1], device=device)
-        model = ModelChunk2()
+    with torch.device(device):
+        if rank == 0:    
+            example_input = torch.randn(int(batch_size / n_microbatches), in_dim, device=device)
+            model = ModelChunk0()
+        elif rank == 1:
+            example_input = torch.randn(int(batch_size / n_microbatches), layer_dims[0], device=device)
+            model = ModelChunk1()
+        elif rank == 2:
+            example_input = torch.randn(int(batch_size / n_microbatches), layer_dims[1], device=device)
+            model = ModelChunk2()
 
-    if rank in [0,1,2]:
-        model.to(device)  # Move the model to the device
-        stage = PipelineStage(
-            submodule=model,
-            stage_index=rank,
-            num_stages=world_size,
-            device=device,
-            input_args=example_input,
-        )
-        print(f"Rank {rank} initialized")
-    else:
-        raise RuntimeError("Invalid rank")
+        if rank in [0,1,2]:
+            stage = PipelineStage(
+                submodule=model,
+                stage_index=rank,
+                num_stages=world_size,
+                device=device,
+                input_args=example_input,
+            )
+            print(f"Rank {rank} initialized")
+        else:
+            raise RuntimeError("Invalid rank")
 
     # Create a schedule
     schedule = Schedule1F1B(stage, n_microbatches, loss_fn=loss_fn)
@@ -148,7 +146,22 @@ def run_test(gpu_id, world_size):
     else:
         output = schedule.step(target=target)
 
-
+def subprocess(gpu_id, world_size):
+    print("started subprocess")
+    from torch.testing._internal.distributed.fake_pg import FakeStore
+    dev = torch.device("cuda:0")
+    torch.cuda.set_device(dev)
+    os.environ["WORLD_SIZE"] = world_size
+    os.environ["LOCAL_RANK"] = gpu_id
+    store = FakeStore()
+    torch.distributed.init_process_group(
+        "fake", rank=gpu_id, world_size=world_size, store=store
+    )
+    print("intialized process group")
+    with FakeTensorMode():
+        with CollDistMode():
+            print("run test")
+            run_test(gpu_id, world_size)
 
 
 if __name__ == "__main__":
@@ -157,12 +170,24 @@ if __name__ == "__main__":
     # world_size = 2
     # mp.spawn(run_worker, args=(world_size,), nprocs=world_size, join=True)
 
-    try:
-        dist.init_process_group(backend="nccl")
-        gpu_id = int(os.environ["LOCAL_RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        run_test(gpu_id, world_size)
-        dist.destroy_process_group()
+    # try:
+    #     dist.init_process_group(backend="nccl")
+    #     gpu_id = int(os.environ["LOCAL_RANK"])
+    #     world_size = int(os.environ["WORLD_SIZE"])
+    #     with FakeTensorMode():
+    #     # with contextlib.nullcontext():
+    #         with CollDistMode():
+    #             run_test(gpu_id, world_size)
+    #     dist.barrier()
+    #     dist.destroy_process_group()
+    # except Exception as e:
+    #     print(traceback.format_exc())
+    #     print("Unsuccessful.")
+        
+    try: 
+        print("started main")
+        world_size = 3
+        mp.spawn(subprocess, args=(world_size,), nprocs=world_size, join=True)
     except Exception as e:
         print(e)
         print("Unsuccessful.")
