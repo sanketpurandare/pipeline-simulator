@@ -151,8 +151,8 @@ def subprocess(gpu_id, world_size):
     from torch.testing._internal.distributed.fake_pg import FakeStore
     dev = torch.device("cuda:0")
     torch.cuda.set_device(dev)
-    os.environ["WORLD_SIZE"] = world_size
-    os.environ["LOCAL_RANK"] = gpu_id
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_RANK"] = str(gpu_id)
     store = FakeStore()
     torch.distributed.init_process_group(
         "fake", rank=gpu_id, world_size=world_size, store=store
