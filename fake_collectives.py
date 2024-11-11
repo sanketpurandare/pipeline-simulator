@@ -1,6 +1,6 @@
 import torch
 import torch.distributed as dist
-from torch._C._distributed_c10d import ProcessGroup, Work, _resolve_process_group
+from torch._C._distributed_c10d import ProcessGroup, Work, _resolve_process_group, FakeWork
 from torch.futures import Future
 from torch.testing._internal.distributed.fake_pg import FakeStore
 from torch._subclasses.fake_tensor import FakeTensorMode, FakeTensor
@@ -17,124 +17,96 @@ aten = torch.ops.aten
 c10d = torch.ops.c10d
 _c10d_functional = torch.ops._c10d_functional
 
-class FakeWork(Work):
-    def __init__(self):
-        super().__init__()
-
-    def get_future(self) -> Future:
-        future = Future()
-        future.set_result(None)
-        return future
-
-    def wait(self, timeout: Optional[timedelta] = None) -> bool:
-        return True
-
-
 # Meta functions for collective operations with FakeWork
 
+fw = FakeWork()
+print(type(fw))
 
 def _broadcast_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return (args[0], fakework_script_obj)
 
 
 def _all_reduce_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return (args[0], fakework_script_obj)
 
 
 def _all_gather_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return (args[0], fakework_script_obj)
 
 
 def _all_gather_into_tensor_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return (args[0], fakework_script_obj)
 
 
 def _reduce_scatter_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return (args[0], fakework_script_obj)
 
 
 def _reduce_scatter_tensor_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return (args[0], fakework_script_obj)
 
 
 def _reduce_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return fakework_script_obj
 
 
 def _reduce_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return fakework_script_obj
 
 
 def _gather_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return fakework_script_obj
 
 
 def _scatter_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return (args[0], fakework_script_obj)
 
 
 def _alltoall_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return (args[0], fakework_script_obj)
 
 def _alltoall_base_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return fakework_script_obj
 
 
 def _send_meta(*args):
-    print("sendiscalled")
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return fakework_script_obj
 
 
 def _recv_meta(*args):
-    print("recviscalled")
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return fakework_script_obj
 
 
 def _barrier_meta(*args):
     fakework = FakeWork()
-    fakework.__setattr__("getFuture", fakework.get_future)
     fakework_script_obj = fakework.boxed()
     return fakework_script_obj
 
@@ -216,23 +188,22 @@ class CollectiveOp:
         ]:
             pg = ProcessGroup.unbox(args[2])
         elif func in [
-            _c10d_functional.broadcast,
-            _c10d_functional.all_reduce,
-            _c10d_functional.all_gather_into_tensor,
+            _c10d_functional.broadcast.default,
+            _c10d_functional.all_reduce.default,
+            _c10d_functional.all_gather_into_tensor.default,
         ]:
             pg_name = args[2]
-            pg_size = c10d._get_group_size_by_name(pg_name)
             pg = _resolve_process_group(pg_name)
-            return pg_name, pg_size, pg
+            return pg_name, pg.size(), pg
         elif func in [
-            _c10d_functional.reduce_scatter_tensor,
-            _c10d_functional.all_to_all_single
+            _c10d_functional.reduce_scatter_tensor.default,
+            _c10d_functional.all_to_all_single.default
         ]:
             pg_name = args[3]
-            pg_size = c10d._get_group_size_by_name(pg_name)
             pg = _resolve_process_group(pg_name)
-            return pg_name, pg_size
-
+            return pg_name, pg.size(), pg
+        else:
+            raise TypeError(f"Func {func} not found in {collective_op_funcs}")
         return pg.name(), pg.size(), pg
     
     @staticmethod
@@ -268,7 +239,7 @@ class IgnoreDistMode(TorchDispatchMode):
         res = func(*args, **kwargs or {})
 
         if func in collective_op_funcs:
-            pg_name, pg_size = CollectiveOp.get_process_group_properties(args, func)
+            pg_name, pg_size, pg= CollectiveOp.get_process_group_properties(func, args)
             size = CollectiveOp.get_tensor_size(args, func, kwargs, res)
             logging.info(f"Process Group: {pg_name} ({pg_size})")
             logging.info(f"Tensor Size: {size}")
@@ -325,10 +296,11 @@ def run_test():
 def patch_work(script_object: torch.ScriptObject):
     work = Work.unbox(script_object)
     if isinstance(work, FakeWork):
+        logging.info("Correct Arg Received.")
         return script_object
     else:
+        logging.info("Had to patch")
         fakework = FakeWork()
-        fakework.__setattr__("getFuture", fakework.get_future)
         fakework_script_obj = fakework.boxed()
         return fakework_script_obj
 
@@ -343,7 +315,7 @@ class CollDistMode(TorchDispatchMode):
             return new_res
         if func not in collective_op_funcs:
             if "c10d" in func.__name__:
-                print(f"{func.__name__} is not registered.")
+                logging.info(f"{func.__name__} is not registered.")
         return res
 
 if __name__ == "__main__":
