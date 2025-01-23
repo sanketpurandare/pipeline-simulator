@@ -20,7 +20,7 @@ _c10d_functional = torch.ops._c10d_functional
 # Meta functions for collective operations with FakeWork
 
 fw = FakeWork()
-print(type(fw))
+# print(type(fw))
 
 def _broadcast_meta(*args):
     fakework = FakeWork()

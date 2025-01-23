@@ -2,7 +2,10 @@ import os
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import torch
+from torch import optim
 from torch.distributed.pipelining import ScheduleGPipe, Schedule1F1B, PipelineStage
+from torch.distributed._tools.runtime_estimator import RuntimeEstimator
+from torch.distributed._tools.mem_tracker import MemTracker
 import torch.nn.functional as F
 from torch._subclasses.fake_tensor import FakeTensorMode
 from fake_collectives import CollDistMode
@@ -131,7 +134,12 @@ def run_test(gpu_id, world_size):
             print(f"Rank {rank} initialized")
         else:
             raise RuntimeError("Invalid rank")
-
+         
+    optim = torch.optim.Adam(model.parameters(), foreach=True)
+    mem_tracker = MemTracker()
+    mem_tracker.track_external(model, optim)
+    runtime_estimator = RuntimeEstimator(rank)
+         
     # Create a schedule
     schedule = Schedule1F1B(stage, n_microbatches, loss_fn=loss_fn)
 
@@ -142,12 +150,22 @@ def run_test(gpu_id, world_size):
     # Run the pipeline with input `x`
     # `x` will be divided into microbatches automatically
     if rank == 0:
-        schedule.step(x, target=target)
+        with runtime_estimator("operator-level-benchmark"):
+            with mem_tracker as mt:
+                schedule.step(x, target=target)
+                mt.display_modulewise_snapshots(depth=1, units="MiB", tabulate=True)
+            runtime_estimator.display_modulewise_stats(depth=1)
+            
     else:
-        output = schedule.step(target=target)
+        with runtime_estimator("operator-level-benchmark"):
+            with mem_tracker as mt:
+                output = schedule.step(target=target)
+                mt.display_modulewise_snapshots(depth=1, units="MiB", tabulate=True)
+            runtime_estimator.display_modulewise_stats(depth=1)
+
 
 def subprocess(gpu_id, world_size):
-    print("started subprocess")
+    # print("started subprocess")
     from torch.testing._internal.distributed.fake_pg import FakeStore
     dev = torch.device("cuda:0")
     torch.cuda.set_device(dev)
@@ -157,10 +175,10 @@ def subprocess(gpu_id, world_size):
     torch.distributed.init_process_group(
         "fake", rank=gpu_id, world_size=world_size, store=store
     )
-    print("intialized process group")
+    # print("initialized process group")
     with FakeTensorMode():
         with CollDistMode():
-            print("run test")
+            # print("run test")
             run_test(gpu_id, world_size)
 
 
@@ -185,7 +203,7 @@ if __name__ == "__main__":
     #     print("Unsuccessful.")
         
     try: 
-        print("started main")
+        # print("started main")
         world_size = 3
         mp.spawn(subprocess, args=(world_size,), nprocs=world_size, join=True)
     except Exception as e:
