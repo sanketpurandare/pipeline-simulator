@@ -8,7 +8,7 @@ from torch.distributed._tools.runtime_estimator import RuntimeEstimator
 from torch.distributed._tools.mem_tracker import MemTracker
 import torch.nn.functional as F
 from torch._subclasses.fake_tensor import FakeTensorMode
-from fake_collectives import CollDistMode
+from torch.distributed._tools.fake_collectives import *
 import traceback
 import contextlib
 
@@ -138,7 +138,6 @@ def run_test(gpu_id, world_size):
     optim = torch.optim.Adam(model.parameters(), foreach=True)
     mem_tracker = MemTracker()
     mem_tracker.track_external(model, optim)
-    runtime_estimator = RuntimeEstimator(rank)
          
     # Create a schedule
     schedule = Schedule1F1B(stage, n_microbatches, loss_fn=loss_fn)
@@ -150,18 +149,14 @@ def run_test(gpu_id, world_size):
     # Run the pipeline with input `x`
     # `x` will be divided into microbatches automatically
     if rank == 0:
-        with runtime_estimator("operator-level-benchmark"):
-            with mem_tracker as mt:
-                schedule.step(x, target=target)
-                mt.display_modulewise_snapshots(depth=1, units="MiB", tabulate=True)
-            runtime_estimator.display_modulewise_stats(depth=1)
+        with mem_tracker as mt:
+            schedule.step(x, target=target)
+            mt.display_modulewise_snapshots(depth=1, units="MiB", tabulate=True)
             
     else:
-        with runtime_estimator("operator-level-benchmark"):
-            with mem_tracker as mt:
-                output = schedule.step(target=target)
-                mt.display_modulewise_snapshots(depth=1, units="MiB", tabulate=True)
-            runtime_estimator.display_modulewise_stats(depth=1)
+        with mem_tracker as mt:
+            output = schedule.step(target=target)
+            mt.display_modulewise_snapshots(depth=1, units="MiB", tabulate=True)
 
 
 def subprocess(gpu_id, world_size):
@@ -177,9 +172,8 @@ def subprocess(gpu_id, world_size):
     )
     # print("initialized process group")
     with FakeTensorMode():
-        with CollDistMode():
-            # print("run test")
-            run_test(gpu_id, world_size)
+        # print("run test")
+        run_test(gpu_id, world_size)
 
 
 if __name__ == "__main__":
