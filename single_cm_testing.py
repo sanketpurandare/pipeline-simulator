@@ -16,18 +16,18 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torch import optim
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe, Schedule1F1B
-from torch.distributed.pipelining import pipeline, SplitPoint
 from torch.distributed._tools.fake_collectives import *
 from itertools import chain
 from example_context_manager import capture_collectives
 
+# Number of GPUs
 _world_size = 8
-vocab_size = 32000
 
 def loss_fn(outputs, labels):
     return F.cross_entropy(outputs, labels)
 
-def split_model(model, rank):
+# Only have input layer on first stage and output layer on last stage
+def trim_model(model, rank):
     if rank == 0:
         model.norm = None
         model.output = None
@@ -40,8 +40,6 @@ def split_model(model, rank):
     return model
 
 def subprocess(gpu_id, world_size):
-    # dev = torch.device("cuda:0")
-    # torch.cuda.set_device(dev)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["LOCAL_RANK"] = str(gpu_id)
     rank = gpu_id
@@ -50,14 +48,20 @@ def subprocess(gpu_id, world_size):
         "fake", rank=rank, world_size=_world_size, store=store
     )
     
-    n_layers = 16
-    n_microbatches = 8
+    # Llama parameters
+    vocab_size = 32000
+    n_heads = 32
+    dim = 2048
     batch_size = 8
     seq_length = 512
-    num_stages = _world_size
 
-    # create model and move it to GPU - init"cuda"_mesh has already mapped GPU ids.
-    simple_llama2_config = ModelArgs(dim=2048, n_layers=int(n_layers/n_microbatches), n_heads=32, vocab_size=32000)
+    # Pipeline parameters
+    n_layers = 16
+    n_microbatches = 8
+    trackers_on = True
+
+    # create model block and make stage
+    simple_llama2_config = ModelArgs(dim=dim, n_layers=int(n_layers/n_microbatches), n_heads=n_heads, vocab_size=vocab_size)
     fake_mode = True
     with FakeTensorMode() if fake_mode else nullcontext():
 
@@ -69,7 +73,7 @@ def subprocess(gpu_id, world_size):
         with torch.device(device):
             model = Transformer.from_model_args(simple_llama2_config)
             
-            sub_model = split_model(model, rank)
+            sub_model = trim_model(model, rank)
 
             if rank == 0:
                 example_input = torch.randint(0, model.vocab_size, (int(batch_size / n_microbatches), seq_length), device=device)
@@ -107,52 +111,26 @@ def subprocess(gpu_id, world_size):
         # Run the pipeline with input `x`
         # `x` will be divided into microbatches automatically
         if rank == 0:
-            with capture_collectives():
-                with runtime_estimator("operator-level-benchmark"):
-                    with mem_tracker as mt:
-                        schedule.step(x, target=target)
-                        mt.display_modulewise_snapshots(depth=1, units="MiB", tabulate=True)
-                    runtime_estimator.display_modulewise_stats(depth=1)
+            if trackers_on:
+                with capture_collectives():
+                    with runtime_estimator("operator-level-benchmark"):
+                        with mem_tracker as mt:
+                            schedule.step(x, target=target)
+                            mt.display_modulewise_snapshots(depth=1, units="MiB", tabulate=True)
+                        runtime_estimator.display_modulewise_stats(depth=1)
+            else:
+                schedule.step(x, target=target)
                 
         else:
-            with capture_collectives():
-                with runtime_estimator("operator-level-benchmark"):
-                    with mem_tracker as mt:
-                        output = schedule.step(target=target)
-                        mt.display_modulewise_snapshots(depth=1, units="MiB", tabulate=True)
-                    runtime_estimator.display_modulewise_stats(depth=1)
-
-        # # Training loop:
-        # # Perform a num of iterations of forward/backward
-        # # and optimizations for the sharded module.
-        # print("\nStarting 2D training...")
-        # num_iterations = 2
-        # batch_size = 2
-        # torch.cuda.reset_accumulated_memory_stats()
-        # torch.cuda.reset_peak_memory_stats()
-        # mem_tracker = MemTracker()
-        # mem_tracker.track_external(sharded_model, optimizer)
-        # for i in range(num_iterations):
-        #     # seeding with dp_rank to ensure identical inputs for TP groups
-        #     with mem_tracker:
-        #         torch.manual_seed(i + dp_rank)
-        #         inp = torch.randint(32000, (8, 512), device=dev)
-
-        #         output = sharded_model(inp)
-        #         output.sum().backward()
-        #         optimizer.step()
-        #     if i == 0:
-        #         mem_tracker.reset_mod_stats()
-
-        # mem_tracker.display_snapshot("peak", units="GiB", tabulate=True)
-        # mem_stats = torch.cuda.memory_stats()
-        # peak_active = mem_stats["active_bytes.all.peak"]
-        # peak_reserved = mem_stats["reserved_bytes.all.peak"]
-
-        # print(
-        #     f"peak active: {peak_active / gib:.2f} GiB | "
-        #     f"peak reserved: {peak_reserved / gib:.2f} GiB"
-        # )
+            if trackers_on:
+                with capture_collectives():
+                    with runtime_estimator("operator-level-benchmark"):
+                        with mem_tracker as mt:
+                            output = schedule.step(target=target)
+                            mt.display_modulewise_snapshots(depth=1, units="MiB", tabulate=True)
+                        runtime_estimator.display_modulewise_stats(depth=1)
+            else:
+                output = schedule.step(target=target)
 
 if __name__ == "__main__":
     try: 
