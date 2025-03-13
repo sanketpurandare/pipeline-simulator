@@ -1,30 +1,67 @@
 from functools import wraps
 import torch
+from typing import Optional, Any
 from contextlib import contextmanager, nullcontext
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch._subclasses.fake_tensor import FakeTensorMode
 import torch.distributed as dist
 from torch._C._distributed_c10d import Work, FakeWork
 from torch.testing._internal.distributed.fake_pg import FakeStore
+from torch.distributed.pipelining.stage import _PipelineStageBase
 
 
 @contextmanager
 def capture_collectives():
-    saved_batch_isend_irecv = dist.batch_isend_irecv
+    saved_forward_one_chunk = _PipelineStageBase.forward_one_chunk
+    
+    saved_backward_one_chunk = _PipelineStageBase.backward_one_chunk
+    
+    saved_backward_weight_one_chunk = _PipelineStageBase.backward_weight_one_chunk
 
-    @wraps(dist.batch_isend_irecv)
-    def batch_isend_irecv(
-        *args,
-        **kwargs
+    @wraps(_PipelineStageBase.forward_one_chunk)
+    def forward_one_chunk(
+        self,
+        fwd_chunk_id: int,
+        args: tuple[Any, ...],
+        kwargs: Optional[dict[str, Any]] = None,
     ):
-        print("Captured Method")
-        return saved_batch_isend_irecv(*args, **kwargs)
+        print("GPU #", self.stage_index, ": Forwarded mb", fwd_chunk_id)
+        return saved_forward_one_chunk(self, fwd_chunk_id, args, kwargs)
+    
+    @wraps(_PipelineStageBase.backward_one_chunk)
+    def backward_one_chunk(
+        self,
+        bwd_chunk_id: int,
+        loss=None,
+        full_backward: bool = True,
+        last_backward=False,
+    ):
+        if (full_backward == True):
+            print("GPU #", self.stage_index, ": Backwarded mb", bwd_chunk_id)
+        else:
+            print("GPU #", self.stage_index, ": Inputs Backwarded mb", bwd_chunk_id)
+
+        return saved_backward_one_chunk(self, bwd_chunk_id, loss, full_backward, last_backward)
+    
+    @wraps(_PipelineStageBase.backward_weight_one_chunk)
+    def backward_weight_one_chunk(
+        self, 
+        bwd_chunk_id: int, 
+        last_backward=False,
+    ):
+        print("GPU #", self.stage_index, ": Weights Backwarded mb", bwd_chunk_id)
+
+        return saved_backward_weight_one_chunk(self, bwd_chunk_id, last_backward)
     
     try:
-        dist.batch_isend_irecv = batch_isend_irecv
+        _PipelineStageBase.forward_one_chunk = forward_one_chunk
+        _PipelineStageBase.backward_one_chunk = backward_one_chunk
+        _PipelineStageBase.backward_weight_one_chunk = backward_weight_one_chunk
         yield
     finally:
-        dist.batch_isend_irecv = saved_batch_isend_irecv
+        _PipelineStageBase.forward_one_chunk = saved_forward_one_chunk
+        _PipelineStageBase.backward_one_chunk = saved_backward_one_chunk
+        _PipelineStageBase.backward_weight_one_chunk = saved_backward_weight_one_chunk
 
 if __name__ == "__main__":
     use_nccl = False
